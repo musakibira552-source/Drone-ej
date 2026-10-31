@@ -1,89 +1,80 @@
 from __future__ import annotations
 
-import os
+import logging
 from typing import List
 
-from telegram import Update
-from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+import feedparser
 
-from app.config import settings
-from app.models import UserWatchlist
-from app.services.news_service import explain_alert, filter_high_impact, get_demo_news
+from app.models import MarketAlert
+from app.services.impact_service import build_demo_alerts, build_forex_event_alerts, score_impact, classify_market
 
-
-USER_WATCHLISTS: dict[int, UserWatchlist] = {}
+logger = logging.getLogger(__name__)
 
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    USER_WATCHLISTS.setdefault(chat_id, UserWatchlist(chat_id=chat_id, assets=settings.DEFAULT_WATCHLIST))
-    await update.message.reply_text(
-        "Hi! I’m Drone-ej. I scan forex and crypto market news and flag high-impact events.\n\n"
-        "Available commands:\n"
-        "• /start\n"
-        "• /help\n"
-        "• /watchlist\n"
-        "• /demo\n"
-        "• /clear"
-    )
+def get_demo_news() -> List[MarketAlert]:
+    alerts = build_demo_alerts() + build_forex_event_alerts()
+    for item in alerts:
+        item.impact_score = score_impact(item)
+        item.category = classify_market(item.title)
+    return alerts
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "I monitor: BTC, ETH, EUR/USD, USD/JPY, GBP/USD, and key macro events like CPI, NFP, FOMC, ECB, BoE, and BoJ.\n\n"
-        "Use /watchlist to see assets, /demo to preview market alerts, and /clear to reset your context."
-    )
+def fetch_rss_news(source_url: str, default_category: str = "macro") -> List[MarketAlert]:
+    try:
+        feed = feedparser.parse(source_url)
+    except Exception as exc:
+        logger.warning("RSS parse failed for %s: %s", source_url, exc)
+        return []
+
+    items: List[MarketAlert] = []
+    for entry in getattr(feed, "entries", [])[:10]:
+        title = getattr(entry, "title", "Untitled")
+        link = getattr(entry, "link", "")
+        summary = getattr(entry, "summary", "")
+        item = MarketAlert(
+            title=str(title),
+            source=(source_url.split("//")[-1].split("/")[0] if "//" in source_url else "rss"),
+            category=default_category,
+            asset_tags=[],
+            summary=str(summary)[:300],
+            url=str(link),
+            impact_score=0,
+            published_at=getattr(entry, "published", ""),
+        )
+        item.impact_score = score_impact(item)
+        item.category = classify_market(item.title)
+        items.append(item)
+    return items
 
 
-async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    watchlist = USER_WATCHLISTS.setdefault(chat_id, UserWatchlist(chat_id=chat_id, assets=settings.DEFAULT_WATCHLIST))
-    await update.message.reply_text(f"Your watchlist: {', '.join(watchlist.assets)}")
+def filter_high_impact(news_items: List[MarketAlert], minimum_score: int = 75) -> List[MarketAlert]:
+    return [item for item in news_items if item.impact_score >= minimum_score]
 
 
-async def demo_news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    alerts = filter_high_impact(get_demo_news(), minimum_score=75)
-    if not alerts:
-        await update.message.reply_text("No high-impact alerts available right now.")
-        return
-
-    message = "\n\n".join(explain_alert(alert) for alert in alerts)
-    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+def explain_alert(item: MarketAlert) -> str:
+    assets = ", ".join(item.asset_tags) if item.asset_tags else "General"
+    return f"{item.title}\nSource: {item.source}\nImpact: {item.impact_score}/100\nAssets: {assets}"
 
 
-async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    USER_WATCHLISTS[chat_id] = UserWatchlist(chat_id=chat_id, assets=settings.DEFAULT_WATCHLIST)
-    await update.message.reply_text("Your watchlist and chat state were reset.")
-
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text or ""
-    if not text:
-        return
-    if text.startswith("/"):
-        return
-
-    response = (
-        "I’m a market intelligence bot. Send /demo to see sample alerts, /watchlist to view your symbols, or /help for more commands."
-    )
-    await update.message.reply_text(response)
-
-
-class TelegramBot:
-    def __init__(self, token: str) -> None:
-        self.token = token
-
-    async def build(self) -> Application:
-        if not self.token:
-            raise ValueError("TELEGRAM_TOKEN is missing. Add it to your .env file before starting the bot.")
-
-        application = Application.builder().token(self.token).build()
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("watchlist", watchlist_command))
-        application.add_handler(CommandHandler("demo", demo_news_command))
-        application.add_handler(CommandHandler("clear", clear_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-        return application
+def get_live_market_alerts() -> List[MarketAlert]:
+    combined: List[MarketAlert] = []
+    combined.extend(get_demo_news())
+    for source_url in [
+        "https://www.fxstreet.com/rss",
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "https://www.forexfactory.com/ffcal.xml",
+    ]:
+        try:
+            category = "forex" if "fx" in source_url or "forex" in source_url else "crypto"
+            combined.extend(fetch_rss_news(source_url, default_category=category))
+        except Exception as exc:
+            logger.warning("Could not load source %s: %s", source_url, exc)
+    seen = set()
+    deduped: List[MarketAlert] = []
+    for item in combined:
+        key = (item.title.lower(), item.source.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped

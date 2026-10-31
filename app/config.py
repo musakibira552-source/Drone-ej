@@ -8,9 +8,16 @@ class Settings:
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/drone_ej")
-    DEFAULT_WATCHLIST = [item.strip() for item in os.getenv("DEFAULT_WATCHLIST", "BTC,ETH,EUR/USD,USD/JPY,GBP/USD").split(",") if item.strip()]
+    DEFAULT_WATCHLIST = [item.strip() for item in os.getenv("DEFAULT_WATCHLIST", "BTC,ETH,EUR/USD,USD/JPY,GBP/USD,XAU/USD").split(",") if item.strip()]
     ALLOWED_TELEGRAM_USER_IDS = [int(item.strip()) for item in os.getenv("ALLOWED_TELEGRAM_USER_IDS", "").split(",") if item.strip()]
     NEWS_REFRESH_SECONDS = int(os.getenv("NEWS_REFRESH_SECONDS", "180"))
+    BING_SEARCH_KEY = os.getenv("BING_SEARCH_KEY", "")
+    SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
+    NEWS_SOURCES = [
+        "https://www.fxstreet.com/rss",
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "https://www.forexfactory.com/ffcal.xml",
+    ]
 
 
 settings = Settings()

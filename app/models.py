@@ -15,6 +15,18 @@ class MarketAlert:
 
 
 @dataclass
+class EconomicEvent:
+    name: str
+    country: str
+    impact: str
+    pair: str
+    expected: Optional[str] = None
+    actual: Optional[str] = None
+    source: str = "economic calendar"
+    summary: str = ""
+
+
+@dataclass
 class UserWatchlist:
     chat_id: int
     assets: List[str]
